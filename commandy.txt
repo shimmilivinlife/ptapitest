@@ -1,0 +1,7 @@
+build: MSYS_NO_PATHCONV=1 docker compose up -d --build soap xmlrpc mitmproxy runner
+
+spustit testy: MSYS_NO_PATHCONV=1 docker compose run --rm  runner
+
+db seed: MSYS_NO_PATHCONV=1 docker compose exec web_app python /app/seed.py
+         MSYS_NO_PATHCONV=1 docker compose run --rm soap python /app/seed.py
+
