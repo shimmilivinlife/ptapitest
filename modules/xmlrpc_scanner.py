@@ -6,25 +6,6 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class XmlRpcScanner:
-    """Modul pre bezpečnostné testovanie XML-RPC služieb.
-
-    Testy:
-      Pôvodné:
-        - Introspection / API Schema Extraction (PTV-RPC-INTROSPECTION-ENABLED)
-        - XXE Injection (PTV-XML-XXE)
-        - Brute Force (PTV-RPC-BRUTEFORCE-SUCCESS)
-        - Information Disclosure (PTV-GEN-PATH-LEAK, PTV-RPC-VERBOSE-ERRORS, PTV-RPC-TECH-DISCLOSURE)
-        - Type Confusion (PTV-GEN-TYPE-CONFUSION-VERBOSE)
-        - Rate Limiting (PTV-GEN-NO-RATE-LIMIT)
-        - Insecure Transport (PTV-GEN-INSECURE-TRANSPORT)
-
-      Nové:
-        - SSRF cez pingback.ping (PTV-RPC-SSRF-PINGBACK)
-        - DDoS Amplification cez system.multicall (PTV-RPC-MULTICALL-ABUSE)
-        - XML Bomb / Billion Laughs (PTV-XML-BOMB)
-        - Chýbajúce bezpečnostné hlavičky (PTV-GEN-MISSING-HEADERS)
-    """
-
     def __init__(self, session, args, ptjsonlib):
         self.session = session
         self.args = args

@@ -5,26 +5,6 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class SoapScanner:
-    """Modul pre bezpečnostné testovanie SOAP API služieb.
-
-    Testy:
-      Pôvodné:
-        - WSDL Exposure (PTV-SOAP-WSDL-EXPOSED)
-        - XXE Injection (PTV-XML-XXE)
-        - SOAPAction Spoofing (PTV-SOAP-ACTION-SPOOFING)
-        - Information Disclosure (PTV-SOAP-VERBOSE-ERRORS, PTV-GEN-PATH-LEAK, PTV-SOAP-TECH-DISCLOSURE)
-        - WS-Security Replay Protection (PTV-SOAP-REPLAY-RISK)
-        - Rate Limiting (PTV-GEN-NO-RATE-LIMIT)
-        - Insecure Transport (PTV-GEN-INSECURE-TRANSPORT)
-
-      Nové:
-        - XML Bomb / Billion Laughs DoS (PTV-XML-BOMB)
-        - SQL Injection cez SOAP parametre (PTV-SOAP-SQLI)
-        - SOAP Injection / XML Injection (PTV-SOAP-XML-INJECTION)
-        - SSRF cez SOAP parametre (PTV-SOAP-SSRF)
-        - Chýbajúce bezpečnostné hlavičky (PTV-GEN-MISSING-HEADERS)
-    """
-
     MAX_BACKOFF_RETRIES = 2
     BACKOFF_SECONDS = 11
 

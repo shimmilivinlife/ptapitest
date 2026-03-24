@@ -5,14 +5,6 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class Discovery:
-    """Modul pre objavovanie SOAP a XML-RPC endpointov na cieľovej URL.
-
-    Rate-limit aware:
-    - Pri HTTP 429 automaticky počká a zopakuje request
-    - Najprv testuje základnú URL, potom cesty z wordlistu
-    - Ak nájde endpoint cez GET, preskočí POST probu (šetrí requesty)
-    """
-
     COMMON_PATHS = [
         "/service", "/soap", "/api", "/v1/soap", "/v1/api",
         "/Service.asmx", "/Service.svc", "/rpc", "/xmlrpc",

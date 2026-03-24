@@ -6,11 +6,6 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class Fingerprinter:
-    """Modul pre identifikáciu typu služby (SOAP vs XML-RPC vs UNKNOWN).
-
-    Rate-limit aware: pri HTTP 429 automaticky počká a zopakuje request.
-    """
-
     CONFIDENCE_THRESHOLD = 2
     BACKOFF_SECONDS = 11
 
