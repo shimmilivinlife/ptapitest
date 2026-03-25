@@ -23,7 +23,6 @@ import sys
 import os
 import requests
 
-# Import z aktuálneho priečinka
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from _version import __version__
@@ -47,7 +46,6 @@ class PtApiTest:
         self.ptjsonlib = ptjsonlib.PtJsonLib()
         self.args = args
 
-        # Inicializácia HTTP session
         self.session = requests.Session()
         self.session.verify = False
 
@@ -62,25 +60,21 @@ class PtApiTest:
         ptprint(f"Starting {SCRIPTNAME} v{__version__} scan",
                 "TITLE", condition=not self.args.json)
 
-        # 1. Globálna kontrola Insecure Transport
         if not self.args.url.lower().startswith("https"):
             ptprint("Insecure Transport detected (HTTP)!",
                     "VULN", condition=not self.args.json, colortext=True)
 
-        # 2. DISCOVERY — nájdenie endpointov
         disco = Discovery(self.session, self.args)
         potential_targets = disco.find_endpoints()
 
         ptprint(f"Testing {len(potential_targets)} endpoint(s)...",
                 "INFO", condition=not self.args.json)
 
-        # 3. FINGERPRINT + TEST každého endpointu
         tested_count = 0
         for target_url in potential_targets:
             ptprint(f"\n--- Analyzing: {target_url} ---",
                     "TITLE", condition=not self.args.json)
 
-            # Dočasne nastavíme URL na aktuálny cieľ
             original_url = self.args.url
             self.args.url = target_url
 
@@ -92,8 +86,6 @@ class PtApiTest:
                     ptprint(f"SOAP service detected at {target_url}",
                             "OK", condition=not self.args.json)
 
-                    # Ak fingerprinter objavil skutočný endpoint (napr. /service),
-                    # použijeme ho namiesto WSDL URL
                     if fp.discovered_soap_endpoint:
                         ptprint(f"Using discovered endpoint: {fp.discovered_soap_endpoint}",
                                 "INFO", condition=not self.args.json)
@@ -120,7 +112,6 @@ class PtApiTest:
             finally:
                 self.args.url = original_url
 
-        # Záverečné zhrnutie
         if tested_count == 0:
             ptprint("No SOAP or XML-RPC services were identified.",
                     "WARNING", condition=not self.args.json)
@@ -167,7 +158,6 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # Normalizácia URL
     if args.url and not args.url.startswith(('http://', 'https://')):
         args.url = 'http://' + args.url
 

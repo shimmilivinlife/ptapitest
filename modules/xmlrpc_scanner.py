@@ -40,19 +40,14 @@ class XmlRpcScanner:
                                            node_key=self.node_key,
                                            data={"evidence": evidence})
 
-        # Pôvodné testy
         self.test_xxe()
         self.test_brute_force()
         self.test_information_disclosure()
         self.test_type_confusion()
-
-        # Nové testy
         self.test_xml_bomb()
         self.test_ssrf_pingback()
         self.test_multicall_amplification()
         self.test_security_headers()
-
-        # Rate limit ako posledný
         self.test_rate_limiting()
 
     # =========================================================================
@@ -91,10 +86,6 @@ class XmlRpcScanner:
         except Exception as e:
             ptprint(f"Introspection failed: {type(e).__name__}",
                     "INFO", condition=not self.args.json)
-
-    # =========================================================================
-    # PÔVODNÉ TESTY
-    # =========================================================================
 
     def test_xxe(self):
         ptprint("Testing for XXE vulnerability...", "INFO",
@@ -334,10 +325,6 @@ class XmlRpcScanner:
             ptprint("Server handled type confusion securely.", "OK",
                     condition=not self.args.json)
 
-    # =========================================================================
-    # NOVÉ TESTY
-    # =========================================================================
-
     def test_xml_bomb(self):
         """Testuje odolnosť voči XML Bomb / Billion Laughs útoku (DoS).
 
@@ -417,12 +404,10 @@ class XmlRpcScanner:
         ptprint("Testing for SSRF...", "INFO",
                 condition=not self.args.json)
 
-        # Test 1: pingback.ping (WordPress)
         if "pingback.ping" in self.discovered_methods:
             ptprint("  pingback.ping detected — testing SSRF...", "INFO",
                     condition=not self.args.json)
 
-            # Pokus o kontaktovanie localhost cez pingback
             pingback_payload = (
                 '<?xml version="1.0"?>'
                 '<methodCall>'
@@ -443,15 +428,12 @@ class XmlRpcScanner:
 
                 body_lower = r.text.lower()
 
-                # Ak server sa pokúsil kontaktovať localhost
-                # (rôzne chybové hlášky naznačujú, že request bol odoslaný)
                 ssrf_indicators = [
                     "connection refused", "connection reset", "couldn't connect",
                     "cannot connect", "failed to connect", "no response",
                     "timed out", "unreachable",
                 ]
 
-                # Úspešný pingback = server kontaktoval URL
                 if any(ind in body_lower for ind in ssrf_indicators):
                     ptprint("SSRF via pingback.ping — server attempted internal connection!",
                             "VULN", condition=not self.args.json, colortext=True)
@@ -461,7 +443,6 @@ class XmlRpcScanner:
                                           "connection attempt. Server can be used as SSRF proxy."})
                     return
 
-                # Ak odpoveď neobsahuje "is not valid" alebo "not allowed"
                 rejection = ["is not valid", "not allowed", "rejected", "disabled"]
                 if not any(kw in body_lower for kw in rejection):
                     # Ak server akceptoval request bez chyby
@@ -480,7 +461,6 @@ class XmlRpcScanner:
             ptprint("pingback.ping not exploitable for SSRF.", "OK",
                     condition=not self.args.json)
         else:
-            # Test 2: Všeobecný SSRF cez XXE entity (ak DTD je povolené)
             ssrf_payload = (
                 '<?xml version="1.0"?>'
                 '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://127.0.0.1:22">]>'
@@ -524,9 +504,6 @@ class XmlRpcScanner:
             ptprint("system.multicall not available.", "OK",
                     condition=not self.args.json)
             return
-
-        # Pošleme multicall s 10 volaním system.listMethods
-        # Ak server vykoná všetkých 10, je to amplifikačný vektor
         calls = []
         for _ in range(10):
             calls.append(
@@ -554,7 +531,6 @@ class XmlRpcScanner:
 
             body_lower = r.text.lower()
 
-            # Počítame koľko odpovedí server vrátil v multicall
             response_count = body_lower.count("<array>")
 
             if response_count >= 5:
@@ -623,10 +599,6 @@ class XmlRpcScanner:
             ptprint("Security headers present.", "OK",
                     condition=not self.args.json)
 
-    # =========================================================================
-    # Rate Limiting (vždy posledný)
-    # =========================================================================
-
     def test_rate_limiting(self):
         ptprint("Testing rate limiting...", "INFO", condition=not self.args.json)
 
@@ -660,10 +632,6 @@ class XmlRpcScanner:
         else:
             ptprint("Rate limit test inconclusive.", "INFO",
                     condition=not self.args.json)
-
-    # =========================================================================
-    # Pomocné metódy
-    # =========================================================================
 
     @staticmethod
     def _load_wordlist(path, fallback=None):

@@ -111,14 +111,11 @@ class Fingerprinter:
     def _test_soap(self):
         score = 0
 
-        # Test 1: WSDL
         wsdl_score, wsdl_content = self._probe_wsdl()
         score += wsdl_score
 
-        # Test 2: SOAP envelope na hlavnú URL
         score += self._probe_soap_envelope(self.args.url)
 
-        # Test 3: Endpoint z WSDL
         if wsdl_content:
             extracted = self._extract_endpoint_from_wsdl(wsdl_content)
             if extracted and extracted.rstrip('/') != self.args.url.rstrip('/'):
@@ -179,12 +176,11 @@ class Fingerprinter:
         candidates.append(self.args.url.rstrip('/') + "?wsdl")
         if base_url.rstrip('/') != self.args.url.rstrip('/'):
             candidates.append(base_url + "/?wsdl")
-        # Čistý GET — kľúčové pre Flask servery
+
         candidates.append(self.args.url)
         if base_url.rstrip('/') != self.args.url.rstrip('/'):
             candidates.append(base_url + "/")
 
-        # Deduplikácia
         seen = set()
         unique = []
         for url in candidates:
@@ -263,7 +259,6 @@ class Fingerprinter:
                 if not endpoint.startswith("http"):
                     endpoint = base_url.rstrip('/') + '/' + endpoint.lstrip('/')
 
-                # Oprava: ak WSDL obsahuje localhost ale testujeme vzdialený server
                 ep_parsed = urlparse(endpoint)
                 target_parsed = urlparse(self.args.url)
                 ep_host = ep_parsed.hostname or ""
@@ -282,7 +277,6 @@ class Fingerprinter:
 
                 return endpoint
 
-        # WSDL bez endpointu — skúsime bežné cesty
         ptprint("  WSDL has no explicit endpoint, probing common paths...",
                 "INFO", condition=not self.args.json)
         common_paths = ["/service", "/soap", "/ws", "/Service.asmx",

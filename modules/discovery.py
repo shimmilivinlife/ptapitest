@@ -31,7 +31,7 @@ class Discovery:
         "xmlsyntaxerror", "not well-formed",
     ]
 
-    BACKOFF_SECONDS = 11  # Čas čakania pri 429 (musí byť > server window)
+    BACKOFF_SECONDS = 11
 
     def __init__(self, session, args):
         self.session = session
@@ -70,7 +70,7 @@ class Discovery:
         """Hlavná metóda — objaví aktívne SOAP/XML-RPC endpointy."""
         ptprint("Starting endpoint discovery...", "INFO", condition=not self.args.json)
         found_endpoints = []
-        seen_responses = set()  # Hash odpovedí pre detekciu catch-all serverov
+        seen_responses = set()
         base_url = self.args.url.rstrip('/')
 
         paths_to_test = [""] + self.COMMON_PATHS
@@ -78,20 +78,15 @@ class Discovery:
         for path in paths_to_test:
             target = base_url + path
 
-            # FÁZA 1: GET — hľadáme WSDL alebo XML popis
             result = self._check_get_for_service(target)
             if result:
                 resp_hash = result if isinstance(result, str) else ""
                 if resp_hash and resp_hash in seen_responses:
-                    # Server vracia rovnakú odpoveď na rôzne cesty (catch-all)
-                    # Preskočíme — už máme tento endpoint
                     continue
                 if resp_hash:
                     seen_responses.add(resp_hash)
                 found_endpoints.append(target)
                 continue
-
-            # FÁZA 2: POST s XML probou
             if self._check_post_for_service(target):
                 found_endpoints.append(target)
                 continue
@@ -126,8 +121,6 @@ class Discovery:
                            body_lower.lstrip().startswith("<?xml"))
         if not is_xml_response:
             return False
-
-        # Vypočítame hash odpovede pre detekciu duplicít
         resp_hash = hashlib.md5(r.text.encode('utf-8', errors='ignore')).hexdigest()
 
         if any(ind in body_lower for ind in self.SOAP_INDICATORS):
@@ -144,7 +137,6 @@ class Discovery:
 
     def _check_post_for_service(self, url):
         """POST s XML probou — len 1 probe namiesto 2 (šetríme budget)."""
-        # Posielame generickú XML probu, ktorá vyvolá odpoveď od SOAP aj XML-RPC
         generic_probe = '<?xml version="1.0"?><methodCall><methodName>probe</methodName></methodCall>'
 
         r = self._request_with_backoff("POST", url, data=generic_probe,
@@ -156,11 +148,9 @@ class Discovery:
         content_type = r.headers.get("Content-Type", "").lower()
         body_lower = r.text.lower()
 
-        # Odmietame HTML
         if "html" in content_type and "xml" not in content_type:
             return False
 
-        # XML odpoveď s protokolovými indikátormi
         is_xml_like = ("xml" in content_type or
                        body_lower.lstrip().startswith("<?xml") or
                        "<fault" in body_lower or
@@ -173,7 +163,6 @@ class Discovery:
                     "INFO", condition=not self.args.json)
             return True
 
-        # Server parsuje XML (Flask/custom — vracia text/plain error)
         if r.status_code in [400, 500]:
             if any(ind in body_lower for ind in self.XML_PROCESSING_INDICATORS):
                 ptprint(f"  [POST] XML processing detected at {url}",
