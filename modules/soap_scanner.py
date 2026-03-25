@@ -5,6 +5,26 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class SoapScanner:
+    """Modul pre bezpečnostné testovanie SOAP API služieb.
+
+    Testy:
+      Pôvodné:
+        - WSDL Exposure (PTV-SOAP-WSDL-EXPOSED)
+        - XXE Injection (PTV-XML-XXE)
+        - SOAPAction Spoofing (PTV-SOAP-ACTION-SPOOFING)
+        - Information Disclosure (PTV-SOAP-VERBOSE-ERRORS, PTV-GEN-PATH-LEAK, PTV-SOAP-TECH-DISCLOSURE)
+        - WS-Security Replay Protection (PTV-SOAP-REPLAY-RISK)
+        - Rate Limiting (PTV-GEN-NO-RATE-LIMIT)
+        - Insecure Transport (PTV-GEN-INSECURE-TRANSPORT)
+
+      Nové:
+        - XML Bomb / Billion Laughs DoS (PTV-XML-BOMB)
+        - SQL Injection cez SOAP parametre (PTV-SOAP-SQLI)
+        - SOAP Injection / XML Injection (PTV-SOAP-XML-INJECTION)
+        - SSRF cez SOAP parametre (PTV-SOAP-SSRF)
+        - Chýbajúce bezpečnostné hlavičky (PTV-GEN-MISSING-HEADERS)
+    """
+
     MAX_BACKOFF_RETRIES = 2
     BACKOFF_SECONDS = 11
 
@@ -50,9 +70,10 @@ class SoapScanner:
         """Spustí všetky bezpečnostné testy."""
         self.resolve_target_endpoint()
 
-        node = self.jsonlib.create_node_object("soap_api", {"url": self.endpoint_url})
+        node = self.jsonlib.create_node_object("soap_api")
         self.node_key = node.get("key")
         self.jsonlib.add_node(node)
+        self.jsonlib.add_properties(properties={"url": self.endpoint_url}, node_key=self.node_key)
 
         if not self.endpoint_url.lower().startswith("https"):
             self.jsonlib.add_vulnerability("PTV-GEN-INSECURE-TRANSPORT",
@@ -60,16 +81,21 @@ class SoapScanner:
             ptprint("Insecure Transport (HTTP).", "VULN",
                     condition=not self.args.json, colortext=True)
 
+        # Pôvodné testy
         self.test_wsdl_exposure()
         self.test_xxe()
         self.test_soap_action_spoofing()
         self.test_information_disclosure()
         self.test_replay_protection()
+
+        # Nové testy
         self.test_xml_bomb()
         self.test_sql_injection()
         self.test_soap_injection()
         self.test_ssrf()
         self.test_security_headers()
+
+        # Rate limit ako posledný
         self.test_rate_limiting()
 
     # =========================================================================
@@ -126,6 +152,10 @@ class SoapScanner:
                     if not extracted_url.startswith("http"):
                         extracted_url = (self.base_url.rstrip('/') + '/'
                                          + extracted_url.lstrip('/'))
+
+                    # OPRAVA: Ak WSDL obsahuje localhost/127.0.0.1 ale my testujeme
+                    # vzdialený server, nahradíme hostname za skutočný cieľ.
+                    # Toto je bežný problém — vývojári zabudnú zmeniť adresu v WSDL.
                     extracted_parsed = urlparse(extracted_url)
                     target_parsed = urlparse(self.args.url)
 
@@ -136,6 +166,7 @@ class SoapScanner:
                     is_remote_target = target_host not in ("localhost", "127.0.0.1", "::1", "")
 
                     if is_localhost and is_remote_target:
+                        # Nahradíme localhost za skutočný cieľový host:port
                         fixed_url = extracted_url.replace(
                             f"{extracted_parsed.scheme}://{extracted_parsed.netloc}",
                             self.base_url
@@ -445,7 +476,11 @@ class SoapScanner:
         else:
             ptprint("WS-Security replay protection detected.", "OK",
                     condition=not self.args.json)
-            
+
+    # =========================================================================
+    # NOVÉ TESTY
+    # =========================================================================
+
     def test_xml_bomb(self):
         """Testuje odolnosť voči XML Bomb / Billion Laughs útoku (DoS).
 
@@ -455,7 +490,9 @@ class SoapScanner:
         """
         ptprint("Testing XML Bomb (Billion Laughs) resistance...", "INFO",
                 condition=not self.args.json)
-    
+
+        # Zmenšený Billion Laughs — len 3 úrovne expanzie (bezpečné pre test)
+        # Expanduje na ~1000 znakov, nie gigabajty — nechceme zhodiť server
         bomb_payload = (
             '<?xml version="1.0"?>'
             '<!DOCTYPE lolz ['
@@ -474,7 +511,7 @@ class SoapScanner:
         elapsed = time.time() - start_time
 
         if r is None:
-
+            # Timeout alebo crash — server môže byť zraniteľný
             if elapsed >= 14:
                 ptprint("XML Bomb caused timeout — possible DoS vulnerability!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -488,6 +525,7 @@ class SoapScanner:
 
         body_lower = r.text.lower()
 
+        # Bezpečný server by mal odmietnuť entity expansion
         rejection_indicators = [
             "entity", "expansion", "too many", "billion laughs",
             "dtd", "disallowed", "not allowed", "recursive",
@@ -498,6 +536,8 @@ class SoapScanner:
                     condition=not self.args.json)
             return
 
+        # Server spracoval bomb bez chyby — expandoval entity
+        # Kontrola: ak odpoveď obsahuje "lol" viacnásobne, entity sa expandovali
         lol_count = r.text.count("lol")
         if lol_count > 20:
             ptprint(f"XML Bomb processed — entity expanded ({lol_count}x 'lol')!", "VULN",
@@ -534,6 +574,7 @@ class SoapScanner:
             ("Sleep (time-based)", "' OR SLEEP(3)--"),
         ]
 
+        # Najprv pošleme normálny request pre baseline odpoveď
         normal_soap = (
             '<?xml version="1.0"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -569,6 +610,7 @@ class SoapScanner:
 
             body_lower = r.text.lower()
 
+            # Kontrola databázových chýb v odpovedi
             matched = [ind for ind in sql_error_indicators if ind in body_lower]
             if matched:
                 snippet = r.text[:200].strip().replace('\n', ' ')
@@ -580,6 +622,7 @@ class SoapScanner:
                                       f"DB errors: {matched}. Snippet: {snippet}"})
                 return
 
+            # Time-based detection — ak SLEEP payload spôsobí oneskorenie
             if "sleep" in name.lower() and elapsed > 2.5:
                 ptprint(f"Time-based SQL Injection possible ({elapsed:.1f}s delay)!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -601,6 +644,7 @@ class SoapScanner:
         ptprint("Testing for SOAP/XML Injection...", "INFO",
                 condition=not self.args.json)
 
+        # Normálny request pre porovnanie
         normal_soap = (
             '<?xml version="1.0"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -610,6 +654,7 @@ class SoapScanner:
         r_normal = self._safe_post(self.endpoint_url, data=normal_soap,
                                     headers={"Content-Type": "text/xml"})
 
+        # XML injection — pokus o uzavretie tagu a vloženie nového elementu
         injection_payloads = [
             {
                 "name": "Tag break + new element",
@@ -651,8 +696,10 @@ class SoapScanner:
 
             body_lower = r.text.lower()
 
+            # Indikátory, že injekcia bola spracovaná
+            # (server akceptoval neočakávané elementy bez odmietnutia)
             if r_normal and r.status_code == 200 and r_normal.status_code == r.status_code:
-
+                # Server akceptoval injektovaný XML rovnako ako normálny
                 if "admin" in body_lower and "true" in body_lower:
                     ptprint(f"SOAP Injection accepted ({p['name']})!", "VULN",
                             condition=not self.args.json, colortext=True)
@@ -662,6 +709,7 @@ class SoapScanner:
                                           "Server processed injected XML elements."})
                     return
 
+            # Ak CDATA s XSS sa objaví v odpovedi nefiltrovane
             if "<script>" in r.text or "alert(1)" in r.text:
                 ptprint(f"SOAP Injection — XSS in response ({p['name']})!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -671,6 +719,7 @@ class SoapScanner:
                                       "CDATA/script content reflected in response without sanitization."})
                 return
 
+            # Ak server spracoval príkaz z injektovaného namespace
             if "whoami" in body_lower and ("root" in body_lower or "www-data" in body_lower):
                 ptprint(f"SOAP Injection — command executed ({p['name']})!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -680,6 +729,8 @@ class SoapScanner:
                                       "Injected namespace command was executed."})
                 return
 
+        # Kontrola schema validácie — ak server akceptuje ľubovoľné elementy
+        # bez XSD validácie, je to slabý indikátor
         extra_elem_soap = (
             '<?xml version="1.0"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -712,6 +763,7 @@ class SoapScanner:
         ptprint("Testing for SSRF indicators...", "INFO",
                 condition=not self.args.json)
 
+        # SSRF test 1: DTD z externej URL (ak server resolvuje externé entity)
         ssrf_xxe_payload = (
             '<?xml version="1.0"?>'
             '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://127.0.0.1:22">]>'
@@ -728,6 +780,7 @@ class SoapScanner:
         if r is not None:
             body_lower = r.text.lower()
 
+            # Ak server kontaktoval localhost:22, môže vrátiť SSH banner alebo timeout
             ssrf_indicators = [
                 "ssh-", "openssh", "connection refused", "connection reset",
                 "refused to connect", "errno", "timeout", "could not connect",
@@ -744,6 +797,7 @@ class SoapScanner:
                                       f"Server resolves external entities to internal resources."})
                 return
 
+        # SSRF test 2: WSDL import z internej URL
         ssrf_wsdl_payload = (
             '<?xml version="1.0"?>'
             '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://169.254.169.254/latest/meta-data/">]>'
@@ -756,6 +810,7 @@ class SoapScanner:
                              headers={"Content-Type": "text/xml"}, timeout=10)
 
         if r2 is not None:
+            # AWS metadata indicators
             aws_indicators = ["ami-id", "instance-id", "local-ipv4", "public-ipv4",
                               "security-credentials", "iam"]
             if any(ind in r2.text.lower() for ind in aws_indicators):
@@ -779,6 +834,7 @@ class SoapScanner:
         ptprint("Checking security headers...", "INFO",
                 condition=not self.args.json)
 
+        # Pošleme normálny request
         r = self._safe_post(self.endpoint_url,
                             data='<?xml version="1.0"?><soapenv:Envelope '
                                  'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -791,6 +847,7 @@ class SoapScanner:
                     condition=not self.args.json)
             return
 
+        # Kontrola HTTPS-only hlavičiek
         important_headers = {
             "Strict-Transport-Security": "HSTS — ochrana proti downgrade na HTTP",
             "Content-Security-Policy": "CSP — ochrana proti XSS",
@@ -798,6 +855,7 @@ class SoapScanner:
             "X-Frame-Options": "Ochrana proti clickjacking",
         }
 
+        # CORS hlavička — kontrola, či nie je príliš otvorená
         cors_header = r.headers.get("Access-Control-Allow-Origin", "")
 
         missing_headers = []
@@ -821,6 +879,10 @@ class SoapScanner:
         else:
             ptprint("Security headers present.", "OK",
                     condition=not self.args.json)
+
+    # =========================================================================
+    # Rate Limiting (vždy posledný)
+    # =========================================================================
 
     def test_rate_limiting(self):
         ptprint("Testing rate limiting...", "INFO", condition=not self.args.json)
