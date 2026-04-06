@@ -6,6 +6,25 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class XmlRpcScanner:
+    """Modul pre bezpečnostné testovanie XML-RPC služieb.
+
+    Testy:
+      Pôvodné:
+        - Introspection / API Schema Extraction (PTV-RPC-INTROSPECTION-ENABLED)
+        - XXE Injection (PTV-XML-XXE)
+        - Brute Force (PTV-RPC-BRUTEFORCE-SUCCESS)
+        - Information Disclosure (PTV-GEN-PATH-LEAK, PTV-RPC-VERBOSE-ERRORS, PTV-RPC-TECH-DISCLOSURE)
+        - Type Confusion (PTV-GEN-TYPE-CONFUSION-VERBOSE)
+        - Rate Limiting (PTV-GEN-NO-RATE-LIMIT)
+        - Insecure Transport (PTV-GEN-INSECURE-TRANSPORT)
+
+      Nové:
+        - SSRF cez pingback.ping (PTV-RPC-SSRF-PINGBACK)
+        - DDoS Amplification cez system.multicall (PTV-RPC-MULTICALL-ABUSE)
+        - XML Bomb / Billion Laughs (PTV-XML-BOMB)
+        - Chýbajúce bezpečnostné hlavičky (PTV-GEN-MISSING-HEADERS)
+    """
+
     def __init__(self, session, args, ptjsonlib):
         self.session = session
         self.args = args
@@ -41,15 +60,25 @@ class XmlRpcScanner:
                                            node_key=self.node_key,
                                            data={"evidence": evidence})
 
-
+        # Pôvodné testy
         self.test_xxe()
         self.test_brute_force()
         self.test_information_disclosure()
         self.test_type_confusion()
+
+        # Nové testy
         self.test_xml_bomb()
         self.test_ssrf_pingback()
         self.test_multicall_amplification()
         self.test_security_headers()
+
+        # Slovníkový útok na nedokumentované metódy
+        self.test_undocumented_methods()
+
+        # Slovníkový útok na nedokumentované parametre
+        self.test_undocumented_parameters()
+
+        # Rate limit ako posledný
         self.test_rate_limiting()
 
     # =========================================================================
@@ -78,6 +107,9 @@ class XmlRpcScanner:
             if self.discovered_methods:
                 ptprint(f"Extracted {len(self.discovered_methods)} method(s).",
                         "VULN", condition=not self.args.json, colortext=True)
+                for method in self.discovered_methods:
+                    ptprint(f"  Method: {method}", "PARSED",
+                            condition=not self.args.json)
             else:
                 ptprint("Introspection returned no methods.", "INFO",
                         condition=not self.args.json)
@@ -88,6 +120,10 @@ class XmlRpcScanner:
         except Exception as e:
             ptprint(f"Introspection failed: {type(e).__name__}",
                     "INFO", condition=not self.args.json)
+
+    # =========================================================================
+    # PÔVODNÉ TESTY
+    # =========================================================================
 
     def test_xxe(self):
         ptprint("Testing for XXE vulnerability...", "INFO",
@@ -155,11 +191,11 @@ class XmlRpcScanner:
 
         base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
         passwords = self._load_wordlist(
-            os.path.join(base_dir, "wordlist.txt"),
+            os.path.join(base_dir, "wordlists", "passwords.txt"),
             fallback=["123456", "password", "admin123", "root", "test"]
         )
         usernames = self._load_wordlist(
-            os.path.join(base_dir, "usernames.txt"),
+            os.path.join(base_dir, "wordlists", "usernames.txt"),
             fallback=["admin", "root", "user", "test"]
         )
 
@@ -327,6 +363,10 @@ class XmlRpcScanner:
             ptprint("Server handled type confusion securely.", "OK",
                     condition=not self.args.json)
 
+    # =========================================================================
+    # NOVÉ TESTY
+    # =========================================================================
+
     def test_xml_bomb(self):
         """Testuje odolnosť voči XML Bomb / Billion Laughs útoku (DoS).
 
@@ -406,10 +446,12 @@ class XmlRpcScanner:
         ptprint("Testing for SSRF...", "INFO",
                 condition=not self.args.json)
 
+        # Test 1: pingback.ping (WordPress)
         if "pingback.ping" in self.discovered_methods:
             ptprint("  pingback.ping detected — testing SSRF...", "INFO",
                     condition=not self.args.json)
 
+            # Pokus o kontaktovanie localhost cez pingback
             pingback_payload = (
                 '<?xml version="1.0"?>'
                 '<methodCall>'
@@ -430,12 +472,15 @@ class XmlRpcScanner:
 
                 body_lower = r.text.lower()
 
+                # Ak server sa pokúsil kontaktovať localhost
+                # (rôzne chybové hlášky naznačujú, že request bol odoslaný)
                 ssrf_indicators = [
                     "connection refused", "connection reset", "couldn't connect",
                     "cannot connect", "failed to connect", "no response",
                     "timed out", "unreachable",
                 ]
 
+                # Úspešný pingback = server kontaktoval URL
                 if any(ind in body_lower for ind in ssrf_indicators):
                     ptprint("SSRF via pingback.ping — server attempted internal connection!",
                             "VULN", condition=not self.args.json, colortext=True)
@@ -445,8 +490,10 @@ class XmlRpcScanner:
                                           "connection attempt. Server can be used as SSRF proxy."})
                     return
 
+                # Ak odpoveď neobsahuje "is not valid" alebo "not allowed"
                 rejection = ["is not valid", "not allowed", "rejected", "disabled"]
                 if not any(kw in body_lower for kw in rejection):
+                    # Ak server akceptoval request bez chyby
                     if r.status_code == 200 and "fault" not in body_lower:
                         ptprint("SSRF via pingback.ping — request accepted without validation!",
                                 "VULN", condition=not self.args.json, colortext=True)
@@ -462,6 +509,7 @@ class XmlRpcScanner:
             ptprint("pingback.ping not exploitable for SSRF.", "OK",
                     condition=not self.args.json)
         else:
+            # Test 2: Všeobecný SSRF cez XXE entity (ak DTD je povolené)
             ssrf_payload = (
                 '<?xml version="1.0"?>'
                 '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://127.0.0.1:22">]>'
@@ -505,6 +553,9 @@ class XmlRpcScanner:
             ptprint("system.multicall not available.", "OK",
                     condition=not self.args.json)
             return
+
+        # Pošleme multicall s 10 volaním system.listMethods
+        # Ak server vykoná všetkých 10, je to amplifikačný vektor
         calls = []
         for _ in range(10):
             calls.append(
@@ -531,6 +582,8 @@ class XmlRpcScanner:
                                   timeout=self.args.timeout, verify=False)
 
             body_lower = r.text.lower()
+
+            # Počítame koľko odpovedí server vrátil v multicall
             response_count = body_lower.count("<array>")
 
             if response_count >= 5:
@@ -599,6 +652,10 @@ class XmlRpcScanner:
             ptprint("Security headers present.", "OK",
                     condition=not self.args.json)
 
+    # =========================================================================
+    # Rate Limiting (vždy posledný)
+    # =========================================================================
+
     def test_rate_limiting(self):
         ptprint("Testing rate limiting...", "INFO", condition=not self.args.json)
 
@@ -631,6 +688,257 @@ class XmlRpcScanner:
                 data={"evidence": f"Sent {len(codes)} requests. HTTP codes: {unique_codes}"})
         else:
             ptprint("Rate limit test inconclusive.", "INFO",
+                    condition=not self.args.json)
+
+    # =========================================================================
+    # Pomocné metódy
+    # =========================================================================
+
+    def test_undocumented_methods(self):
+        """Slovníkový útok na odhalenie XML-RPC metód, ktoré nie sú v introspection.
+
+        Pre každú metódu z wordlistu pošle XML-RPC methodCall a porovná
+        odpoveď s baseline (neexistujúca metóda). Ak server odpovedá
+        inak — metóda pravdepodobne existuje ale nie je v introspection.
+        """
+        ptprint("Brute-forcing undocumented XML-RPC methods...", "INFO",
+                condition=not self.args.json)
+
+        # Načítanie wordlistu
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        wordlist_path = os.path.join(base_dir, "wordlists", "xmlrpc_methods.txt")
+        if not os.path.exists(wordlist_path):
+            ptprint("No methods wordlist found. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
+            wordlist = [line.strip() for line in f if line.strip()]
+
+        # Známe metódy z introspection (case-sensitive pre XML-RPC)
+        known = set(self.discovered_methods)
+
+        # Baseline — odpoveď na jednoznačne neexistujúcu metódu
+        baseline_payload = (
+            "<?xml version='1.0'?>"
+            "<methodCall><methodName>nonexistent.method.839274</methodName></methodCall>"
+        )
+        try:
+            baseline_r = self.session.post(
+                self.args.url, data=baseline_payload,
+                headers={"Content-Type": "text/xml"},
+                timeout=self.args.timeout, verify=False)
+            baseline_status = baseline_r.status_code
+            baseline_body = baseline_r.text.lower()
+            baseline_len = len(baseline_r.text)
+            # Extrahujeme fault message z baseline pre porovnanie
+            baseline_has_fault = "faultstring" in baseline_body
+        except Exception:
+            ptprint("Could not establish baseline. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        found_methods = []
+
+        for method_name in wordlist:
+            if not method_name:
+                continue
+
+            # Preskočíme metódy, ktoré už poznáme z introspection
+            if method_name in known:
+                continue
+
+            payload = (
+                f"<?xml version='1.0'?>"
+                f"<methodCall><methodName>{method_name}</methodName></methodCall>"
+            )
+
+            try:
+                r = self.session.post(
+                    self.args.url, data=payload,
+                    headers={"Content-Type": "text/xml"},
+                    timeout=self.args.timeout, verify=False)
+            except Exception:
+                continue
+
+            body_lower = r.text.lower()
+
+            # Porovnáme s baseline
+            is_different = False
+
+            # Ak baseline vracia fault "method not found" a táto odpoveď NIE je fault
+            if baseline_has_fault and "faultstring" not in body_lower:
+                is_different = True
+
+            # Ak baseline vracia fault a tento response tiež, ale s inou správou
+            if (baseline_has_fault and "faultstring" in body_lower and
+                    abs(len(r.text) - baseline_len) > 100):
+                is_different = True
+
+            # Ak odpoveď obsahuje <params> — metóda vrátila výsledok
+            if "<params>" in body_lower and "<value>" in body_lower:
+                is_different = True
+
+            # Iný HTTP status code
+            if r.status_code != baseline_status:
+                is_different = True
+
+            if is_different:
+                found_methods.append(method_name)
+                ptprint(f"  Undocumented method found: {method_name} (HTTP {r.status_code})",
+                        "VULN", condition=not self.args.json, colortext=True)
+
+        if found_methods:
+            self.undocumented_methods = found_methods  # Uložíme pre parameter brute force
+            introspection_info = (f"Introspection shows: {', '.join(self.discovered_methods)}"
+                                  if self.discovered_methods
+                                  else "Introspection not available")
+            self.jsonlib.add_vulnerability(
+                "PTV-RPC-UNDOCUMENTED-METHODS", node_key=self.node_key,
+                data={"evidence": f"Dictionary attack found {len(found_methods)} "
+                                  f"undocumented method(s): {', '.join(found_methods)}. "
+                                  f"{introspection_info}"})
+        else:
+            ptprint("No undocumented methods found.", "OK",
+                    condition=not self.args.json)
+
+    def test_undocumented_parameters(self):
+        """Slovníkový útok na nedokumentované parametre XML-RPC metód.
+
+        Pre každú známu metódu skúša pridať ďalšie pomenované parametre
+        (ako struct) z wordlistu. Porovnáva odpoveď s baseline volaním.
+        Ak server reaguje odlišne, parameter pravdepodobne existuje.
+
+        XML-RPC nepodporuje pomenované parametre natívne, ale mnohé
+        implementácie prijímajú struct ako prvý/posledný parameter,
+        kde kľúče slúžia ako pomenované parametre.
+        """
+        ptprint("Brute-forcing undocumented XML-RPC parameters...", "INFO",
+                condition=not self.args.json)
+
+        if not self.discovered_methods:
+            ptprint("No methods discovered. Skipping parameter brute-force.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        # Načítanie wordlistu parametrov
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        params_path = os.path.join(base_dir, "wordlists", "xmlrpc_params.txt")
+        if not os.path.exists(params_path):
+            ptprint("No params wordlist found. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        with open(params_path, "r", encoding="utf-8", errors="ignore") as f:
+            param_names = [line.strip() for line in f if line.strip()]
+
+        # Filtrujeme metódy — preskočíme system.* metódy (štandardné, známe parametre)
+        # Testujeme dokumentované AJ nedokumentované metódy (ak boli nájdené)
+        methods_to_test = [m for m in self.discovered_methods
+                           if not m.startswith("system.")]
+
+        # Pridáme aj nedokumentované metódy nájdené slovníkovým útokom
+        # (uložené v self.undocumented_methods)
+        if hasattr(self, 'undocumented_methods'):
+            for m in self.undocumented_methods:
+                if m not in methods_to_test and not m.startswith("system."):
+                    methods_to_test.append(m)
+
+        if not methods_to_test:
+            ptprint("No user methods to test. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        all_findings = []
+
+        for method in methods_to_test:
+            # Baseline 1: volanie metódy bez parametrov
+            baseline1_payload = (
+                f"<?xml version='1.0'?>"
+                f"<methodCall><methodName>{method}</methodName>"
+                f"<params></params></methodCall>"
+            )
+
+            # Baseline 2: volanie metódy s jedným neexistujúcim struct parametrom
+            baseline2_payload = (
+                f"<?xml version='1.0'?>"
+                f"<methodCall><methodName>{method}</methodName>"
+                f"<params><param><value><struct>"
+                f"<member><name>nonexistentParam839274</name>"
+                f"<value><string>test</string></value></member>"
+                f"</struct></value></param></params></methodCall>"
+            )
+
+            try:
+                b1_r = self.session.post(self.args.url, data=baseline1_payload,
+                                         headers={"Content-Type": "text/xml"},
+                                         timeout=self.args.timeout, verify=False)
+                b2_r = self.session.post(self.args.url, data=baseline2_payload,
+                                         headers={"Content-Type": "text/xml"},
+                                         timeout=self.args.timeout, verify=False)
+            except Exception:
+                continue
+
+            # Tolerancia z dvoch baselinov
+            tolerance = abs(len(b1_r.text) - len(b2_r.text)) + 30
+
+            # Zistíme, ktorý baseline použiť na porovnanie
+            # (niektoré metódy vyžadujú parametre, iné nie)
+            baseline_status = b2_r.status_code
+            baseline_len = len(b2_r.text)
+
+            found_params = []
+
+            for param_name in param_names:
+                test_payload = (
+                    f"<?xml version='1.0'?>"
+                    f"<methodCall><methodName>{method}</methodName>"
+                    f"<params><param><value><struct>"
+                    f"<member><name>{param_name}</name>"
+                    f"<value><string>test</string></value></member>"
+                    f"</struct></value></param></params></methodCall>"
+                )
+
+                try:
+                    r = self.session.post(self.args.url, data=test_payload,
+                                           headers={"Content-Type": "text/xml"},
+                                           timeout=self.args.timeout, verify=False)
+                except Exception:
+                    continue
+
+                # Porovnáme s baseline
+                is_different = False
+
+                if r.status_code != baseline_status:
+                    is_different = True
+                elif abs(len(r.text) - baseline_len) > tolerance:
+                    is_different = True
+
+                # Odpoveď obsahuje úspešný výsledok
+                if ("<params>" in r.text.lower() and
+                        "<params>" not in b2_r.text.lower()):
+                    is_different = True
+
+                if is_different:
+                    found_params.append(param_name)
+
+            if found_params:
+                ptprint(f"  {method}: undocumented params: {', '.join(found_params)}",
+                        "VULN", condition=not self.args.json, colortext=True)
+                all_findings.append({
+                    "method": method,
+                    "params": found_params
+                })
+
+        if all_findings:
+            evidence_parts = [f"{f['method']}({', '.join(f['params'])})"
+                              for f in all_findings]
+            self.jsonlib.add_vulnerability(
+                "PTV-RPC-UNDOCUMENTED-PARAMS", node_key=self.node_key,
+                data={"evidence": f"Dictionary attack found undocumented parameters: "
+                                  f"{'; '.join(evidence_parts)}"})
+        else:
+            ptprint("No undocumented parameters found.", "OK",
                     condition=not self.args.json)
 
     @staticmethod

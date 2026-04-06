@@ -5,6 +5,25 @@ from ptlibs.ptprinthelper import ptprint
 
 
 class SoapScanner:
+    """Modul pre bezpečnostné testovanie SOAP API služieb.
+
+    Testy:
+      Pôvodné:
+        - WSDL Exposure (PTV-SOAP-WSDL-EXPOSED)
+        - XXE Injection (PTV-XML-XXE)
+        - SOAPAction Spoofing (PTV-SOAP-ACTION-SPOOFING)
+        - Information Disclosure (PTV-SOAP-VERBOSE-ERRORS, PTV-GEN-PATH-LEAK, PTV-SOAP-TECH-DISCLOSURE)
+        - WS-Security Replay Protection (PTV-SOAP-REPLAY-RISK)
+        - Rate Limiting (PTV-GEN-NO-RATE-LIMIT)
+        - Insecure Transport (PTV-GEN-INSECURE-TRANSPORT)
+
+      Nové:
+        - XML Bomb / Billion Laughs DoS (PTV-XML-BOMB)
+        - SQL Injection cez SOAP parametre (PTV-SOAP-SQLI)
+        - SOAP Injection / XML Injection (PTV-SOAP-XML-INJECTION)
+        - SSRF cez SOAP parametre (PTV-SOAP-SSRF)
+        - Chýbajúce bezpečnostné hlavičky (PTV-GEN-MISSING-HEADERS)
+    """
 
     MAX_BACKOFF_RETRIES = 2
     BACKOFF_SECONDS = 11
@@ -18,6 +37,7 @@ class SoapScanner:
         self.endpoint_url = self.args.url
         self.wsdl_content = ""
         self.wsdl_url = ""
+        self.known_operations = []  # Operácie extrahované z WSDL
 
     def _safe_post(self, url, data, headers=None, timeout=None):
         """POST s automatickým retry pri HTTP 429."""
@@ -62,17 +82,30 @@ class SoapScanner:
             ptprint("Insecure Transport (HTTP).", "VULN",
                     condition=not self.args.json, colortext=True)
 
+        # Pôvodné testy
         self.test_wsdl_exposure()
         self.test_xxe()
         self.test_soap_action_spoofing()
         self.test_information_disclosure()
         self.test_replay_protection()
+
+        # Nové testy
         self.test_xml_bomb()
         self.test_sql_injection()
         self.test_soap_injection()
         self.test_ssrf()
         self.test_security_headers()
+
+        # Slovníkové útoky na nedokumentované endpointy a operácie
+        self.test_undocumented_endpoints()
+        self.test_undocumented_operations()
+
+        # Rate limit ako posledný
         self.test_rate_limiting()
+
+    # =========================================================================
+    # WSDL Resolution
+    # =========================================================================
 
     def resolve_target_endpoint(self):
         ptprint("Resolving SOAP endpoint from WSDL...", "INFO",
@@ -124,6 +157,10 @@ class SoapScanner:
                     if not extracted_url.startswith("http"):
                         extracted_url = (self.base_url.rstrip('/') + '/'
                                          + extracted_url.lstrip('/'))
+
+                    # OPRAVA: Ak WSDL obsahuje localhost/127.0.0.1 ale my testujeme
+                    # vzdialený server, nahradíme hostname za skutočný cieľ.
+                    # Toto je bežný problém — vývojári zabudnú zmeniť adresu v WSDL.
                     extracted_parsed = urlparse(extracted_url)
                     target_parsed = urlparse(self.args.url)
 
@@ -134,6 +171,7 @@ class SoapScanner:
                     is_remote_target = target_host not in ("localhost", "127.0.0.1", "::1", "")
 
                     if is_localhost and is_remote_target:
+                        # Nahradíme localhost za skutočný cieľový host:port
                         fixed_url = extracted_url.replace(
                             f"{extracted_parsed.scheme}://{extracted_parsed.netloc}",
                             self.base_url
@@ -153,6 +191,10 @@ class SoapScanner:
             ptprint("WSDL found but no explicit endpoint address.",
                     "INFO", condition=not self.args.json)
             return
+
+    # =========================================================================
+    # PÔVODNÉ TESTY
+    # =========================================================================
 
     def test_wsdl_exposure(self):
         ptprint("Checking for WSDL exposure...", "INFO", condition=not self.args.json)
@@ -178,7 +220,8 @@ class SoapScanner:
             namespace = re.search(r'targetNamespace="([^"]+)"', self.wsdl_content)
             ns_text = namespace.group(1) if namespace else "unknown"
             operations = re.findall(r'<\w*:?operation\s+name="([^"]+)"', self.wsdl_content)
-            op_count = len(operations)
+            self.known_operations = list(set(operations))  # Uložíme pre porovnanie so slovníkovým útokom
+            op_count = len(self.known_operations)
 
             evidence = f"WSDL accessible at {self.wsdl_url}. Namespace: {ns_text}"
             if operations:
@@ -189,6 +232,10 @@ class SoapScanner:
                                            data={"evidence": evidence})
             ptprint(f"WSDL exposure confirmed ({op_count} operations).", "VULN",
                     condition=not self.args.json, colortext=True)
+            # Výpis jednotlivých operácií z WSDL
+            for op in self.known_operations:
+                ptprint(f"  WSDL operation: {op}", "PARSED",
+                        condition=not self.args.json)
         else:
             ptprint("No WSDL exposure detected.", "OK",
                     condition=not self.args.json)
@@ -440,6 +487,10 @@ class SoapScanner:
             ptprint("WS-Security replay protection detected.", "OK",
                     condition=not self.args.json)
 
+    # =========================================================================
+    # NOVÉ TESTY
+    # =========================================================================
+
     def test_xml_bomb(self):
         """Testuje odolnosť voči XML Bomb / Billion Laughs útoku (DoS).
 
@@ -449,6 +500,9 @@ class SoapScanner:
         """
         ptprint("Testing XML Bomb (Billion Laughs) resistance...", "INFO",
                 condition=not self.args.json)
+
+        # Zmenšený Billion Laughs — len 3 úrovne expanzie (bezpečné pre test)
+        # Expanduje na ~1000 znakov, nie gigabajty — nechceme zhodiť server
         bomb_payload = (
             '<?xml version="1.0"?>'
             '<!DOCTYPE lolz ['
@@ -467,6 +521,7 @@ class SoapScanner:
         elapsed = time.time() - start_time
 
         if r is None:
+            # Timeout alebo crash — server môže byť zraniteľný
             if elapsed >= 14:
                 ptprint("XML Bomb caused timeout — possible DoS vulnerability!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -480,6 +535,7 @@ class SoapScanner:
 
         body_lower = r.text.lower()
 
+        # Bezpečný server by mal odmietnuť entity expansion
         rejection_indicators = [
             "entity", "expansion", "too many", "billion laughs",
             "dtd", "disallowed", "not allowed", "recursive",
@@ -489,6 +545,9 @@ class SoapScanner:
             ptprint("Server correctly rejected entity expansion.", "OK",
                     condition=not self.args.json)
             return
+
+        # Server spracoval bomb bez chyby — expandoval entity
+        # Kontrola: ak odpoveď obsahuje "lol" viacnásobne, entity sa expandovali
         lol_count = r.text.count("lol")
         if lol_count > 20:
             ptprint(f"XML Bomb processed — entity expanded ({lol_count}x 'lol')!", "VULN",
@@ -525,6 +584,7 @@ class SoapScanner:
             ("Sleep (time-based)", "' OR SLEEP(3)--"),
         ]
 
+        # Najprv pošleme normálny request pre baseline odpoveď
         normal_soap = (
             '<?xml version="1.0"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -560,6 +620,7 @@ class SoapScanner:
 
             body_lower = r.text.lower()
 
+            # Kontrola databázových chýb v odpovedi
             matched = [ind for ind in sql_error_indicators if ind in body_lower]
             if matched:
                 snippet = r.text[:200].strip().replace('\n', ' ')
@@ -571,6 +632,7 @@ class SoapScanner:
                                       f"DB errors: {matched}. Snippet: {snippet}"})
                 return
 
+            # Time-based detection — ak SLEEP payload spôsobí oneskorenie
             if "sleep" in name.lower() and elapsed > 2.5:
                 ptprint(f"Time-based SQL Injection possible ({elapsed:.1f}s delay)!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -592,6 +654,7 @@ class SoapScanner:
         ptprint("Testing for SOAP/XML Injection...", "INFO",
                 condition=not self.args.json)
 
+        # Normálny request pre porovnanie
         normal_soap = (
             '<?xml version="1.0"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -601,6 +664,7 @@ class SoapScanner:
         r_normal = self._safe_post(self.endpoint_url, data=normal_soap,
                                     headers={"Content-Type": "text/xml"})
 
+        # XML injection — pokus o uzavretie tagu a vloženie nového elementu
         injection_payloads = [
             {
                 "name": "Tag break + new element",
@@ -642,7 +706,10 @@ class SoapScanner:
 
             body_lower = r.text.lower()
 
+            # Indikátory, že injekcia bola spracovaná
+            # (server akceptoval neočakávané elementy bez odmietnutia)
             if r_normal and r.status_code == 200 and r_normal.status_code == r.status_code:
+                # Server akceptoval injektovaný XML rovnako ako normálny
                 if "admin" in body_lower and "true" in body_lower:
                     ptprint(f"SOAP Injection accepted ({p['name']})!", "VULN",
                             condition=not self.args.json, colortext=True)
@@ -652,6 +719,7 @@ class SoapScanner:
                                           "Server processed injected XML elements."})
                     return
 
+            # Ak CDATA s XSS sa objaví v odpovedi nefiltrovane
             if "<script>" in r.text or "alert(1)" in r.text:
                 ptprint(f"SOAP Injection — XSS in response ({p['name']})!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -661,6 +729,7 @@ class SoapScanner:
                                       "CDATA/script content reflected in response without sanitization."})
                 return
 
+            # Ak server spracoval príkaz z injektovaného namespace
             if "whoami" in body_lower and ("root" in body_lower or "www-data" in body_lower):
                 ptprint(f"SOAP Injection — command executed ({p['name']})!", "VULN",
                         condition=not self.args.json, colortext=True)
@@ -670,6 +739,8 @@ class SoapScanner:
                                       "Injected namespace command was executed."})
                 return
 
+        # Kontrola schema validácie — ak server akceptuje ľubovoľné elementy
+        # bez XSD validácie, je to slabý indikátor
         extra_elem_soap = (
             '<?xml version="1.0"?>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -693,48 +764,93 @@ class SoapScanner:
                 condition=not self.args.json)
 
     def test_ssrf(self):
-        """Testuje Server-Side Request Forgery (SSRF) cez SOAP parametre.
+        """Testuje Server-Side Request Forgery (SSRF) cez XML entity resolution.
 
-        Ak server spracováva URL zo SOAP parametrov (napr. pri importe,
-        callback, alebo WSDL resolution), útočník môže donútiť server
-        urobiť request na interné zdroje.
+        Ak server resolvuje externé entity, útočník môže donútiť server
+        urobiť request na interné zdroje (localhost, cloud metadata, atď.).
+
+        Používa dva testy:
+        1. Entity na port 22 (SSH) — ak spôsobí timeout, server sa pokúsil pripojiť
+        2. Entity na AWS metadata endpoint
         """
         ptprint("Testing for SSRF indicators...", "INFO",
                 condition=not self.args.json)
 
+        # Najprv zmeráme normálny response time
+        normal_start = time.time()
+        normal_r = self._safe_post(self.endpoint_url,
+                                    data='<?xml version="1.0"?><soapenv:Envelope '
+                                         'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+                                         '<soapenv:Body><message>ssrf_baseline</message></soapenv:Body>'
+                                         '</soapenv:Envelope>',
+                                    headers={"Content-Type": "text/xml"}, timeout=5)
+        normal_elapsed = time.time() - normal_start
+
+        if normal_r is None:
+            ptprint("Server not responding. Skipping SSRF test.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        # SSRF test 1: Entity smerujúca na non-routable IP adresu
+        # 10.255.255.1 je neexistujúca adresa, ktorá spôsobí timeout
+        # (na rozdiel od 127.0.0.1:22 kde Docker okamžite odmietne spojenie)
         ssrf_xxe_payload = (
             '<?xml version="1.0"?>'
-            '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://127.0.0.1:22">]>'
+            '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://10.255.255.1:80/test">]>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
             '<soapenv:Body><message>&ssrf;</message></soapenv:Body>'
             '</soapenv:Envelope>'
         )
 
-        start = time.time()
-        r = self._safe_post(self.endpoint_url, data=ssrf_xxe_payload,
-                            headers={"Content-Type": "text/xml"}, timeout=10)
-        elapsed = time.time() - start
+        ssrf_r = None
+        ssrf_elapsed = 0
+        try:
+            ssrf_start = time.time()
+            ssrf_r = self.session.post(self.endpoint_url, data=ssrf_xxe_payload,
+                                       headers={"Content-Type": "text/xml"},
+                                       timeout=5, verify=False)
+            ssrf_elapsed = time.time() - ssrf_start
+        except Exception:
+            ssrf_elapsed = time.time() - ssrf_start
+            # Timeout alebo connection error — to je očakávané pri SSRF
 
-        if r is not None:
-            body_lower = r.text.lower()
+        ptprint(f"  SSRF timing: normal={normal_elapsed:.1f}s, ssrf={ssrf_elapsed:.1f}s",
+                "INFO", condition=not self.args.json)
 
+        # Kontrola odpovede na SSRF indikátory
+        if ssrf_r is not None:
+            body_lower = ssrf_r.text.lower()
             ssrf_indicators = [
                 "ssh-", "openssh", "connection refused", "connection reset",
-                "refused to connect", "errno", "timeout", "could not connect",
+                "refused to connect", "errno", "could not connect",
+                "urlopen error", "urlerror", "ioerror", "oserror",
             ]
             matched = [ind for ind in ssrf_indicators if ind in body_lower]
 
             if matched:
-                ptprint(f"SSRF indicators detected (server tried internal connection)!", "VULN",
+                ptprint("SSRF detected — server contacted internal resource!", "VULN",
                         condition=not self.args.json, colortext=True)
                 self.jsonlib.add_vulnerability(
                     "PTV-SOAP-SSRF", node_key=self.node_key,
-                    data={"evidence": f"Entity resolution to http://127.0.0.1:22 returned "
+                    data={"evidence": f"Entity resolution to http://10.255.255.1:80 returned "
                                       f"connection indicators: {matched}. "
                                       f"Server resolves external entities to internal resources."})
                 return
 
-        ssrf_wsdl_payload = (
+        # Ak SSRF payload spôsobil výrazne dlhšiu odpoveď alebo timeout
+        if ssrf_elapsed >= 4.0 and normal_elapsed < 3:
+            ptprint("SSRF detected — timeout indicates server-side connection attempt!", "VULN",
+                    condition=not self.args.json, colortext=True)
+            self.jsonlib.add_vulnerability(
+                "PTV-SOAP-SSRF", node_key=self.node_key,
+                data={"evidence": f"Entity resolution to http://10.255.255.1:80 caused "
+                                  f"response delay ({ssrf_elapsed:.1f}s) while normal requests "
+                                  f"complete in {normal_elapsed:.1f}s. "
+                                  f"Server attempted to connect to internal resource."})
+            return
+
+        # SSRF test 2: AWS metadata endpoint
+        ssrf_meta_payload = (
             '<?xml version="1.0"?>'
             '<!DOCTYPE foo [<!ENTITY ssrf SYSTEM "http://169.254.169.254/latest/meta-data/">]>'
             '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -742,8 +858,8 @@ class SoapScanner:
             '</soapenv:Envelope>'
         )
 
-        r2 = self._safe_post(self.endpoint_url, data=ssrf_wsdl_payload,
-                             headers={"Content-Type": "text/xml"}, timeout=10)
+        r2 = self._safe_post(self.endpoint_url, data=ssrf_meta_payload,
+                             headers={"Content-Type": "text/xml"}, timeout=5)
 
         if r2 is not None:
             aws_indicators = ["ami-id", "instance-id", "local-ipv4", "public-ipv4",
@@ -768,6 +884,8 @@ class SoapScanner:
         """
         ptprint("Checking security headers...", "INFO",
                 condition=not self.args.json)
+
+        # Pošleme normálny request
         r = self._safe_post(self.endpoint_url,
                             data='<?xml version="1.0"?><soapenv:Envelope '
                                  'xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -779,12 +897,16 @@ class SoapScanner:
             ptprint("Could not complete security headers check.", "INFO",
                     condition=not self.args.json)
             return
+
+        # Kontrola HTTPS-only hlavičiek
         important_headers = {
             "Strict-Transport-Security": "HSTS — ochrana proti downgrade na HTTP",
             "Content-Security-Policy": "CSP — ochrana proti XSS",
             "X-Content-Type-Options": "Ochrana proti MIME type sniffing",
             "X-Frame-Options": "Ochrana proti clickjacking",
         }
+
+        # CORS hlavička — kontrola, či nie je príliš otvorená
         cors_header = r.headers.get("Access-Control-Allow-Origin", "")
 
         missing_headers = []
@@ -808,6 +930,10 @@ class SoapScanner:
         else:
             ptprint("Security headers present.", "OK",
                     condition=not self.args.json)
+
+    # =========================================================================
+    # Rate Limiting (vždy posledný)
+    # =========================================================================
 
     def test_rate_limiting(self):
         ptprint("Testing rate limiting...", "INFO", condition=not self.args.json)
@@ -844,3 +970,231 @@ class SoapScanner:
         else:
             ptprint("Rate limit test inconclusive (server unreachable).", "INFO",
                     condition=not self.args.json)
+
+    # =========================================================================
+    # SLOVNÍKOVÉ ÚTOKY — nedokumentované endpointy a operácie
+    # =========================================================================
+
+    def test_undocumented_endpoints(self):
+        """Slovníkový útok na odhalenie SOAP endpointov, ktoré nie sú vo WSDL.
+
+        Skúša bežné cesty z wordlistu a porovnáva odpovede oproti
+        známym endpointom z WSDL. Nové endpointy reportuje ako nález.
+        """
+        ptprint("Brute-forcing undocumented SOAP endpoints...", "INFO",
+                condition=not self.args.json)
+
+        # Načítanie wordlistu
+        wordlist = self._load_wordlist("soap_endpoints.txt")
+        if not wordlist:
+            ptprint("No endpoint wordlist found. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        # Známe endpointy — tie, ktoré už poznáme z WSDL alebo discovery
+        known = {self.endpoint_url.rstrip('/').lower(), self.base_url.rstrip('/').lower()}
+
+        soap_body = ('<?xml version="1.0"?><soap:Envelope xmlns:soap='
+                     '"http://schemas.xmlsoap.org/soap/envelope/">'
+                     '<soap:Body><test>probe</test></soap:Body></soap:Envelope>')
+
+        # Dual-baseline — dve rôzne neexistujúce cesty na výpočet tolerancie
+        baseline1_path = "/nonexistent_path_8374629"
+        baseline2_path = "/anotherfake_472910xy"
+
+        baseline1_r = self._safe_post(
+            self.base_url + baseline1_path, data=soap_body,
+            headers={"Content-Type": "text/xml"})
+        baseline2_r = self._safe_post(
+            self.base_url + baseline2_path, data=soap_body,
+            headers={"Content-Type": "text/xml"})
+
+        if baseline1_r is None or baseline2_r is None:
+            ptprint("Could not establish baseline. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        baseline_status = baseline1_r.status_code
+
+        # Tolerancia = rozdiel medzi dvoma baseline odpoveďami + rezerva
+        len_diff = abs(len(baseline1_r.text) - len(baseline2_r.text))
+        tolerance = len_diff + 30
+
+        found_endpoints = []
+
+        for path in wordlist:
+            path = path.strip()
+            if not path or not path.startswith('/'):
+                continue
+
+            test_url = self.base_url + path
+
+            # Preskočíme už známe endpointy
+            if test_url.rstrip('/').lower() in known:
+                continue
+
+            r = self._safe_post(
+                test_url, data=soap_body,
+                headers={"Content-Type": "text/xml; charset=utf-8",
+                          "SOAPAction": '""'})
+
+            if r is None:
+                continue
+
+            # Porovnáme s baseline
+            if r.status_code == 404:
+                continue
+            if r.status_code == 405:
+                continue
+
+            # Ak rovnaký status code a dĺžka v rámci tolerancie = generická odpoveď
+            if r.status_code == baseline_status and abs(len(r.text) - len(baseline1_r.text)) <= tolerance:
+                continue
+
+            # Odlišná odpoveď — pravdepodobný endpoint
+            ct = r.headers.get("Content-Type", "").lower()
+            if "html" in ct and "xml" not in ct:
+                continue
+
+            found_endpoints.append(path)
+            ptprint(f"  Undocumented endpoint found: {path} (HTTP {r.status_code})",
+                    "VULN", condition=not self.args.json, colortext=True)
+
+        if found_endpoints:
+            self.jsonlib.add_vulnerability(
+                "PTV-SOAP-UNDOCUMENTED-ENDPOINTS", node_key=self.node_key,
+                data={"evidence": f"Dictionary attack found {len(found_endpoints)} "
+                                  f"endpoint(s) not in WSDL: {', '.join(found_endpoints)}"})
+        else:
+            ptprint("No undocumented endpoints found.", "OK",
+                    condition=not self.args.json)
+
+    def test_undocumented_operations(self):
+        """Slovníkový útok na odhalenie SOAP operácií, ktoré nie sú vo WSDL.
+
+        Pre každý názov operácie z wordlistu pošle SOAP request
+        s danou SOAPAction a porovná odpoveď s baseline (neexistujúca operácia).
+
+        Kľúčové: odpoveď sa normalizuje (odstráni sa názov operácie)
+        pred porovnaním, aby sa eliminovali false positive zo serverov,
+        ktoré echo-ujú názov operácie v chybovej správe.
+        """
+        ptprint("Brute-forcing undocumented SOAP operations...", "INFO",
+                condition=not self.args.json)
+
+        wordlist = self._load_wordlist("soap_operations.txt")
+        if not wordlist:
+            ptprint("No operations wordlist found. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        known_lower = {op.lower() for op in self.known_operations}
+
+        # Baseline — odpoveď na jednoznačne neexistujúcu operáciu
+        # Používame rovnakú štruktúru SOAPAction ako pre testy (urn:test:NAZOV)
+        baseline_op = "nonexistentOp839274"
+        baseline_soap = (
+            '<?xml version="1.0"?>'
+            '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+            f'<soap:Body><{baseline_op} xmlns="http://tempuri.org/"/></soap:Body>'
+            '</soap:Envelope>'
+        )
+        baseline_r = self._safe_post(
+            self.endpoint_url, data=baseline_soap,
+            headers={"Content-Type": "text/xml; charset=utf-8",
+                      "SOAPAction": f'"urn:test:{baseline_op}"'})
+
+        # Druhý baseline s iným názvom — slúži na overenie, že server
+        # vracia rovnakú odpoveď pre rôzne neexistujúce operácie
+        baseline2_op = "anotherFakeOp472910"
+        baseline2_soap = (
+            '<?xml version="1.0"?>'
+            '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+            f'<soap:Body><{baseline2_op} xmlns="http://tempuri.org/"/></soap:Body>'
+            '</soap:Envelope>'
+        )
+        baseline2_r = self._safe_post(
+            self.endpoint_url, data=baseline2_soap,
+            headers={"Content-Type": "text/xml; charset=utf-8",
+                      "SOAPAction": f'"urn:test:{baseline2_op}"'})
+
+        if baseline_r is None or baseline2_r is None:
+            ptprint("Could not establish baseline. Skipping.", "INFO",
+                    condition=not self.args.json)
+            return
+
+        baseline_status = baseline_r.status_code
+
+        # Vypočítame toleranciu — rozdiel medzi dvoma baseline odpoveďami
+        # Toto je maximálny rozdiel, ktorý server produkuje pre neexistujúce operácie
+        # (spôsobený echo-ovaním rôzne dlhých názvov operácií)
+        len_diff_baselines = abs(len(baseline_r.text) - len(baseline2_r.text))
+        tolerance = len_diff_baselines + 20  # + malá rezerva
+
+        found_operations = []
+
+        for op_name in wordlist:
+            op_name = op_name.strip()
+            if not op_name:
+                continue
+
+            if op_name.lower() in known_lower:
+                continue
+
+            soap_request = (
+                f'<?xml version="1.0"?>'
+                f'<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+                f'<soap:Body><{op_name} xmlns="http://tempuri.org/"/></soap:Body>'
+                f'</soap:Envelope>'
+            )
+
+            r = self._safe_post(
+                self.endpoint_url, data=soap_request,
+                headers={"Content-Type": "text/xml; charset=utf-8",
+                          "SOAPAction": f'"urn:test:{op_name}"'})
+
+            if r is None:
+                continue
+
+            # Porovnáme s baseline
+            is_different = False
+
+            # Iný HTTP status code = silný indikátor
+            # (vrátane 404 — ak baseline vracia 500 a operácia 404, server ju rozpoznal)
+            if r.status_code != baseline_status:
+                is_different = True
+
+            # Porovnanie dĺžky odpovede s toleranciou
+            elif abs(len(r.text) - len(baseline_r.text)) > tolerance:
+                is_different = True
+
+            # Odpoveď obsahuje úspešný výsledok (nie fault)
+            if "<params>" in r.text.lower() or ("<value>" in r.text.lower() and "fault" not in r.text.lower()):
+                is_different = True
+
+            if is_different:
+                found_operations.append(op_name)
+                ptprint(f"  Undocumented operation found: {op_name} (HTTP {r.status_code})",
+                        "VULN", condition=not self.args.json, colortext=True)
+
+        if found_operations:
+            wsdl_info = f"WSDL declares: {', '.join(self.known_operations)}" if self.known_operations else "No WSDL available"
+            self.jsonlib.add_vulnerability(
+                "PTV-SOAP-UNDOCUMENTED-OPERATIONS", node_key=self.node_key,
+                data={"evidence": f"Dictionary attack found {len(found_operations)} "
+                                  f"undocumented operation(s): {', '.join(found_operations)}. "
+                                  f"{wsdl_info}"})
+        else:
+            ptprint("No undocumented operations found.", "OK",
+                    condition=not self.args.json)
+
+    @staticmethod
+    def _load_wordlist(filename):
+        """Načíta wordlist z wordlists/ priečinka."""
+        import os
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        wordlist_path = os.path.join(base_dir, "wordlists", filename)
+        if os.path.exists(wordlist_path):
+            with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
+                return [line.strip() for line in f if line.strip()]
+        return []
